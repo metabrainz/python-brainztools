@@ -1,7 +1,6 @@
 import unittest
 import mock
-
-from freezegun import freeze_time
+from redis import ResponseError
 
 from brainzutils import cache
 from brainzutils import metrics
@@ -9,54 +8,68 @@ from brainzutils import metrics
 
 class MetricsTestCase(unittest.TestCase):
 
-    def setUp(self) -> None:
+    def setUp(self):
         cache.init('redis')
 
-    @freeze_time('2020-10-14 14:20:21')
-    @mock.patch('brainzutils.metrics.cache.hincrby')
-    def test_increment_hourly(self, hincrby):
-        m = metrics.Metrics('test_m', metrics.METRICS_RANGE_HOUR)
-        m.increment(2)
-        hincrby.assert_called_with('test_m', '2020-10-14T14:00:00+00:00', 2, namespace='metrics')
+    def tearDown(self):
+        metrics._metrics_site_name = None
 
-    @freeze_time('2020-10-14 14:25:21')
     @mock.patch('brainzutils.metrics.cache.hincrby')
-    def test_increment_10_min(self, hincrby):
-        m = metrics.Metrics('test_m', metrics.METRICS_RANGE_10MIN)
-        m.increment()
-        hincrby.assert_called_with('test_m', '2020-10-14T14:20:00+00:00', 1, namespace='metrics')
+    def test_increment(self, hincrby):
+        metrics.init('listenbrainz.org')
+        metrics.increment('test_m', 2)
+        hincrby.assert_called_with('listenbrainz.org', 'test_m', 2, namespace='metrics')
+
+    @mock.patch('brainzutils.metrics.cache.hincrby')
+    def test_increment_default(self, hincrby):
+        metrics.init('listenbrainz.org')
+        metrics.increment('test_m')
+        hincrby.assert_called_with('listenbrainz.org', 'test_m', 1, namespace='metrics')
+
+    def test_increment_negative(self):
+        metrics.init('listenbrainz.org')
+        with self.assertRaises(ValueError):
+            metrics.increment('test_m', -2)
+
+    def test_increment_badname(self):
+        metrics.init('listenbrainz.org')
+        with self.assertRaises(ValueError):
+            metrics.increment('tag')
+
+    def test_increment_noinit(self):
+        with self.assertRaises(RuntimeError):
+            metrics.increment('test_m')
+
+    @mock.patch('brainzutils.metrics.cache.hincrby')
+    @mock.patch('brainzutils.metrics.cache.hset')
+    def test_increment_overflow(self, hset, hincrby):
+        hincrby.side_effect = [ResponseError("increment or decrement would overflow"), 10]
+        metrics.init('listenbrainz.org')
+        metrics.increment('test_m', 10)
+
+        hincrby.assert_has_calls([mock.call('listenbrainz.org', 'test_m', 10, namespace='metrics'),
+                                  mock.call('listenbrainz.org', 'test_m', 10, namespace='metrics')])
+        hset.assert_called_with('listenbrainz.org', 'test_m', 0, namespace='metrics')
+
+    @mock.patch('brainzutils.metrics.cache.hdel')
+    def test_remove(self, hdel):
+        metrics.init('listenbrainz.org')
+        metrics.remove('test_m')
+        hdel.assert_called_with('listenbrainz.org', ['test_m'], namespace='metrics')
 
     @mock.patch('brainzutils.metrics.cache.hgetall')
     def test_stats(self, hgetall):
-        hgetall.return_value = {b'2020-10-14T14:00:00+00:00': b'1',
-                                b'2020-10-14T15:00:00+00:00': b'20',
-                                b'2020-10-14T16:00:00+00:00': b'8'}
+        metrics.init('listenbrainz.org')
+        hgetall.return_value = {b'valueone': b'1',
+                                b'valuetwo': b'20',
+                                b'somethingelse': b'8'}
 
-        stats = metrics.stats('test_m')
-        hgetall.assert_called_with('test_m', namespace='metrics')
+        stats = metrics.stats()
+        hgetall.assert_called_with('listenbrainz.org', namespace='metrics')
 
-        expected = [
-            {'time': '2020-10-14T14:00:00+00:00', 'amount': 1},
-            {'time': '2020-10-14T15:00:00+00:00', 'amount': 20},
-            {'time': '2020-10-14T16:00:00+00:00', 'amount': 8}
-        ]
+        expected = {'valueone': 1,
+                    'valuetwo': 20,
+                    'somethingelse': 8,
+                    'tag': 'listenbrainz.org'}
+
         self.assertEqual(stats, expected)
-
-    @mock.patch('brainzutils.metrics.cache.hkeys')
-    @mock.patch('brainzutils.metrics.cache.hdel')
-    def test_expire(self, hdel, hkeys):
-        hkeys.return_value = [b'2020-10-14T14:00:00+00:00',
-                              b'2020-10-14T18:00:00+00:00',
-                              b'2020-10-14T15:00:00+00:00',
-                              b'2020-10-14T16:00:00+00:00',
-                              b'2020-10-14T17:00:00+00:00']
-
-        m = metrics.Metrics('test_m', metrics.METRICS_RANGE_10MIN)
-        m._expire_old_items(2)
-        hkeys.assert_called_with('test_m', namespace='metrics')
-
-        hdel.assert_called_with('test_m',
-                                [b'2020-10-14T16:00:00+00:00',
-                                 b'2020-10-14T17:00:00+00:00',
-                                 b'2020-10-14T18:00:00+00:00'],
-                                namespace='metrics'),

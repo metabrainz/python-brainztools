@@ -248,7 +248,7 @@ def hincrby(name, key, amount, namespace=None):
 
     Args:
         name: Name of the hash
-        key: Key of the item in the has to increment
+        key: Key of the item in the hash to increment
         amount: the number to increment the key by
         namespace: Namespace for the name
 
@@ -284,6 +284,24 @@ def hkeys(name, namespace=None):
         A list of [key] values for all keys in the hash
     """
     return _r.hkeys(_prep_keys_list([name], namespace)[0])
+
+
+@init_required
+def hset(name, key, value, namespace=None):
+    """Delete the specified keys from a hash using HDEL.
+    Note that the ``keys`` argument must be a list. This differs from the underlying redis
+    library's version of this command, which takes varargs.
+
+    Args:
+        name: Name of the hash
+        key: Key of the item in the hash to set
+        value: value to set the item to
+        namespace: Namespace for the name
+
+    Returns:
+        the number of keys deleted from the hash
+    """
+    return _r.hset(_prep_keys_list([name], namespace)[0], key, value)
 
 
 @init_required
